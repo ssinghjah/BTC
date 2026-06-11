@@ -1,0 +1,5 @@
+ruleName,platform,maxLossPercent,stopLossPrice,entryPrice,action
+BTC Stop Loss 5%,bitcoin,5,,50000,sell
+ETH Stop Loss 10%,ethereum,10,3000,3500,sell
+BTC Take Profit,bitcoin,,,55000,sell
+ETH Conservative Exit,ethereum,3,2800,3200,sell
