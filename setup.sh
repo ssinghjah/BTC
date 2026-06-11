@@ -15,7 +15,7 @@ else
 fi
 
 PYTHON=".venv/bin/python"
-PIP=".venv/bin/pip"
+PIP=".venv/bin/pip3"
 
 # ── Upgrade pip ───────────────────────────────────────────────────────────────
 echo "⬆️   Upgrading pip…"
