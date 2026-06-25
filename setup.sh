@@ -15,15 +15,14 @@ else
 fi
 
 PYTHON=".venv/bin/python"
-PIP=".venv/bin/pip3"
 
 # ── Upgrade pip ───────────────────────────────────────────────────────────────
 echo "⬆️   Upgrading pip…"
-"$PIP" install --upgrade pip --quiet
+"$PYTHON" -m pip install --upgrade pip --quiet
 
 # ── Install Python dependencies ───────────────────────────────────────────────
 echo "📥  Installing Python dependencies…"
-"$PIP" install -r backend/trading_rules/requirements.txt
+"$PYTHON" -m pip install -r backend/trading_rules/requirements.txt
 
 echo ""
 echo "✅  Setup complete!"

@@ -20,6 +20,9 @@ _SYMBOL_MAP = {
     "BNBUSDT": "BNBUSD",
 }
 
+# Public list of all supported trading symbols
+SUPPORTED_SYMBOLS: list[str] = list(_SYMBOL_MAP)
+
 
 def fetch_ohlcv(
     symbol: str = "BTCUSDT",

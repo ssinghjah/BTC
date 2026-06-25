@@ -13,6 +13,7 @@ import argparse
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 from .backend import TradingRules
 from .data import fetch_4h_and_1h
@@ -107,6 +108,17 @@ def run(
         symbol, account_balance, risk_pct, fib_ratio,
     )
     log.info("=" * 70)
+    notifier.startup(symbol, account_balance)
+
+    # ── Signal state tracking ──────────────────────────────────────────────────
+    # Emails fire only on genuine state changes, not on every hourly poll.
+    #   _last_entry_ts   – entry_ts of the last signal we emailed about;
+    #                      a new/different value means a new trade setup.
+    #   _prev_had_signal – True = previous iteration had a signal,
+    #                      False = previous iteration had no signal,
+    #                      None  = first iteration (unknown).
+    _last_entry_ts: object = None
+    _prev_had_signal: Optional[bool] = None
 
     iteration = 0
     while True:
@@ -114,10 +126,20 @@ def run(
         now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
         log.info("── Iteration #%d  (%s) ──", iteration, now_utc)
 
+        # ── Step 1: Fetch data ───────────────────────────────────────────────
+        df_4h = df_1h = None
         try:
             df_4h, df_1h = fetch_4h_and_1h(
                 symbol, limit_4h=limit_4h, limit_1h=limit_1h
             )
+        except Exception as data_exc:
+            log.error("[%s] Data fetch error: %s", symbol, data_exc, exc_info=True)
+            notifier.data_fetch_error(symbol, data_exc)
+            _sleep_until_next_hour()
+            continue
+
+        # ── Step 2: Analyse ─────────────────────────────────────────────────
+        try:
             # drop the currently open (incomplete) candle from both frames
             df_4h = df_4h.iloc[:-1]
             df_1h = df_1h.iloc[:-1]
@@ -133,12 +155,87 @@ def run(
             if result is None:
                 reason = "no qualifying structure or entry found"
                 _log_no_signal(symbol, reason, latest_price)
-                notifier.no_signal(symbol, reason, latest_price)
+                # Email only on transition: signal → no-signal
+                if _prev_had_signal is not False:
+                    notifier.no_signal(symbol, reason, latest_price)
+                else:
+                    log.info("[%s] No signal (unchanged) — skipping email", symbol)
+                _prev_had_signal = False
+                _last_entry_ts   = None
             else:
                 _log_result(symbol, result, latest_price)
-                notifier.signal(symbol, result, latest_price)
+                current_entry_ts = result.get("entry_ts")
+                # Email only when this is a NEW signal (entry_ts has changed)
+                if current_entry_ts != _last_entry_ts:
+                    log.info("[%s] New signal detected (entry_ts=%s) — sending email",
+                             symbol, current_entry_ts)
+                    notifier.signal(symbol, result, latest_price)
+                    _last_entry_ts = current_entry_ts
+                else:
+                    log.info("[%s] Signal unchanged (entry_ts=%s) — skipping email",
+                             symbol, current_entry_ts)
+                _prev_had_signal = True
 
         except Exception as exc:  # keep the loop alive on transient errors
             log.error("[%s] Error during analysis: %s", symbol, exc, exc_info=True)
+            notifier.error(symbol, exc)
 
         _sleep_until_next_hour()
+
+
+# ── One-shot scan ──────────────────────────────────────────────────────────────────────
+
+def scan_all_symbols(
+    symbols: list[str] | None = None,
+    account_balance: float = 10_000.0,
+    risk_pct: float = 1.0,
+    fib_ratio: float = 0.618,
+    fib_tol: float = 0.002,
+    limit_4h: int = 200,
+    limit_1h: int = 200,
+) -> list[dict]:
+    """Fetch and analyse every symbol once; return a list of result records.
+
+    Each record contains:
+        symbol       str
+        signal       dict | None   – TradingRules.analyze() output, or None
+        latest_price float | None
+        error        str | None    – exception message if the symbol failed
+        scanned_at   datetime      – UTC timestamp of the scan
+    """
+    from .data import SUPPORTED_SYMBOLS
+
+    target = symbols or SUPPORTED_SYMBOLS
+    rules  = TradingRules(risk_pct=risk_pct, fib_ratio=fib_ratio, fib_tol=fib_tol)
+    records: list[dict] = []
+
+    for sym in target:
+        scanned_at = datetime.now(timezone.utc)
+        try:
+            df_4h, df_1h = fetch_4h_and_1h(sym, limit_4h=limit_4h, limit_1h=limit_1h)
+            df_4h = df_4h.iloc[:-1]
+            df_1h = df_1h.iloc[:-1]
+            latest_price = float(df_1h["close"].iloc[-1])
+            result = rules.analyze(df_4h, df_1h, account_balance)
+            records.append({
+                "symbol":       sym,
+                "signal":       result,
+                "latest_price": latest_price,
+                "error":        None,
+                "scanned_at":   scanned_at,
+            })
+            status = "✅ SIGNAL" if result else "⚪ no signal"
+            log.info("[scan] %-10s  %s  price=%.4f", sym, status, latest_price)
+        except Exception as exc:
+            log.error("[scan] %s failed: %s", sym, exc, exc_info=True)
+            records.append({
+                "symbol":       sym,
+                "signal":       None,
+                "latest_price": None,
+                "error":        str(exc),
+                "scanned_at":   scanned_at,
+            })
+
+    active = sum(1 for r in records if r.get("signal"))
+    log.info("[scan] complete — %d/%d symbol(s) with active signals", active, len(records))
+    return records

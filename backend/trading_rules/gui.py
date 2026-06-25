@@ -9,17 +9,21 @@ Opens http://127.0.0.1:8050 in your browser automatically.
 """
 
 import argparse
+import os
 import threading
 import webbrowser
+from datetime import datetime, timezone
 
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 
 from .backend import TradingRules, find_pivots, compute_fib_level, evaluate_4h_structure
 from .data import fetch_4h_and_1h
+from .email_notifier import EmailNotifier, EventType
+from .runner import scan_all_symbols
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
@@ -99,6 +103,50 @@ flowchart TD
 </body>
 </html>
 """
+
+# ── Notifications tab helpers ───────────────────────────────────────────────
+
+_INPUT_STYLE = {
+    "width": "100%",
+    "boxSizing": "border-box",
+    "backgroundColor": "#0d1117",  # C_BG value (can’t reference before layout)
+    "color": "#c9d1d9",
+    "border": "1px solid #30363d",
+    "borderRadius": "6px",
+    "padding": "7px 10px",
+    "fontSize": "13px",
+    "fontFamily": "'Courier New', Courier, monospace",
+}
+
+_LABEL_STYLE = {
+    "color": "#8b949e",
+    "fontSize": "11px",
+    "display": "block",
+    "marginBottom": "4px",
+    "textTransform": "uppercase",
+    "letterSpacing": "0.5px",
+}
+
+
+def _smtp_field(
+    label: str,
+    field_id: str,
+    placeholder: str,
+    value: str,
+    input_type: str = "text",
+) -> html.Div:
+    """Labelled text input for the SMTP settings form."""
+    return html.Div([
+        html.Label(label, style=_LABEL_STYLE),
+        dcc.Input(
+            id=field_id,
+            placeholder=placeholder,
+            value=value,
+            type=input_type,
+            style=_INPUT_STYLE,
+        ),
+    ])
+
 
 # ── Dash application ──────────────────────────────────────────────────────────
 app = dash.Dash(__name__, title="Trading Rules Dashboard")
@@ -277,6 +325,261 @@ app.layout = html.Div(
                         ),
                     ],
                 ),
+
+                # ── Tab 3: All Signals ───────────────────────────────────────────
+                dcc.Tab(
+                    label="📋  All Signals",
+                    value="signals",
+                    style={"backgroundColor": C_BG, "color": C_MUTED,
+                           "border": f"1px solid {C_BORDER}", "padding": "8px 18px",
+                           "fontSize": "13px", "fontFamily": "inherit"},
+                    selected_style={"backgroundColor": C_PANEL, "color": C_TEXT,
+                                    "border": f"1px solid {C_BORDER}",
+                                    "borderBottom": f"2px solid {C_BLUE}",
+                                    "padding": "8px 18px", "fontSize": "13px",
+                                    "fontFamily": "inherit"},
+                    children=[
+                        # Controls
+                        html.Div([
+                            html.Button(
+                                "⟳  Scan All",
+                                id="scan-btn",
+                                n_clicks=0,
+                                style={
+                                    "backgroundColor": "#238636",
+                                    "color": "#ffffff",
+                                    "border": "none",
+                                    "borderRadius": "6px",
+                                    "padding": "9px 20px",
+                                    "fontSize": "13px",
+                                    "cursor": "pointer",
+                                    "fontFamily": "inherit",
+                                },
+                            ),
+                            html.Div(
+                                id="signals-status",
+                                style={"fontSize": "12px", "color": C_MUTED,
+                                       "alignSelf": "center"},
+                                children="Click '⟳ Scan All' to fetch current signals for all symbols.",
+                            ),
+                        ], style={"display": "flex", "gap": "14px",
+                                  "alignItems": "center", "marginBottom": "18px"}),
+
+                        dcc.Loading(
+                            type="circle",
+                            color=C_BLUE,
+                            children=html.Div(id="signals-table"),
+                        ),
+                    ],
+                ),
+
+                # ── Tab 4: Notifications ──────────────────────────────────────────
+                dcc.Tab(
+                    label="📧  Notifications",
+                    value="notifications",
+                    style={"backgroundColor": C_BG, "color": C_MUTED,
+                           "border": f"1px solid {C_BORDER}", "padding": "8px 18px",
+                           "fontSize": "13px", "fontFamily": "inherit"},
+                    selected_style={"backgroundColor": C_PANEL, "color": C_TEXT,
+                                    "border": f"1px solid {C_BORDER}",
+                                    "borderBottom": f"2px solid {C_BLUE}",
+                                    "padding": "8px 18px", "fontSize": "13px",
+                                    "fontFamily": "inherit"},
+                    children=[
+                        html.Div(
+                            style={"display": "grid",
+                                   "gridTemplateColumns": "1fr 1fr",
+                                   "gap": "24px", "padding": "4px 0"},
+                            children=[
+
+                                # ── SMTP config ─────────────────────────────
+                                html.Div([
+                                    html.H3("SMTP Configuration",
+                                            style={"color": C_TEXT, "fontSize": "15px",
+                                                   "margin": "0 0 16px 0",
+                                                   "fontWeight": "600"}),
+
+                                    # Host + Port
+                                    html.Div(
+                                        style={"display": "grid",
+                                               "gridTemplateColumns": "3fr 1fr",
+                                               "gap": "10px", "marginBottom": "10px"},
+                                        children=[
+                                            _smtp_field("SMTP Host", "smtp-host-input",
+                                                        "smtp.gmail.com",
+                                                        os.environ.get("SMTP_HOST", "")),
+                                            _smtp_field("Port", "smtp-port-input",
+                                                        "587",
+                                                        os.environ.get("SMTP_PORT", "587")),
+                                        ],
+                                    ),
+
+                                    # User + Password
+                                    html.Div(
+                                        style={"display": "grid",
+                                               "gridTemplateColumns": "1fr 1fr",
+                                               "gap": "10px", "marginBottom": "10px"},
+                                        children=[
+                                            _smtp_field("SMTP User", "smtp-user-input",
+                                                        "alerts@example.com",
+                                                        os.environ.get("SMTP_USER", "")),
+                                            _smtp_field("Password", "smtp-password-input",
+                                                        "App password",
+                                                        os.environ.get("SMTP_PASSWORD", ""),
+                                                        input_type="password"),
+                                        ],
+                                    ),
+
+                                    # From
+                                    html.Div(style={"marginBottom": "10px"},
+                                             children=[_smtp_field(
+                                                 "From Address", "smtp-from-input",
+                                                 "Trading Rules <alerts@example.com>",
+                                                 os.environ.get("SMTP_FROM", ""))]),
+
+                                    # To
+                                    html.Div(style={"marginBottom": "10px"},
+                                             children=[_smtp_field(
+                                                 "To Addresses (comma-separated)",
+                                                 "notify-to-input",
+                                                 "you@example.com, team@example.com",
+                                                 os.environ.get("NOTIFY_TO", ""))]),
+
+                                    # TLS toggle
+                                    html.Div(style={"marginBottom": "16px"}, children=[
+                                        dcc.Checklist(
+                                            id="smtp-tls-check",
+                                            options=[{"label": "  Use STARTTLS", "value": "tls"}],
+                                            value=["tls"] if os.environ.get(
+                                                "SMTP_USE_TLS", "true").lower() != "false" else [],
+                                            inputStyle={"marginRight": "6px",
+                                                        "accentColor": C_BLUE,
+                                                        "cursor": "pointer",
+                                                        "width": "14px", "height": "14px"},
+                                            labelStyle={"cursor": "pointer",
+                                                        "color": C_TEXT,
+                                                        "fontSize": "13px",
+                                                        "display": "inline-flex",
+                                                        "alignItems": "center"},
+                                        ),
+                                    ]),
+
+                                    # Action buttons
+                                    html.Div(
+                                        style={"display": "flex", "gap": "10px",
+                                               "marginBottom": "14px"},
+                                        children=[
+                                            html.Button(
+                                                "💾  Save Settings",
+                                                id="save-email-btn",
+                                                n_clicks=0,
+                                                style={"backgroundColor": "#1f6feb",
+                                                       "color": "#ffffff",
+                                                       "border": "none",
+                                                       "borderRadius": "6px",
+                                                       "padding": "9px 18px",
+                                                       "fontSize": "13px",
+                                                       "cursor": "pointer",
+                                                       "fontFamily": "inherit"},
+                                            ),
+                                            html.Button(
+                                                "📧  Send Test Email",
+                                                id="test-email-btn",
+                                                n_clicks=0,
+                                                style={"backgroundColor": "#238636",
+                                                       "color": "#ffffff",
+                                                       "border": "none",
+                                                       "borderRadius": "6px",
+                                                       "padding": "9px 18px",
+                                                       "fontSize": "13px",
+                                                       "cursor": "pointer",
+                                                       "fontFamily": "inherit"},
+                                            ),
+                                        ],
+                                    ),
+
+                                    # Status
+                                    html.Div(id="notif-status",
+                                             style={"fontSize": "12px",
+                                                    "minHeight": "24px"}),
+
+                                ], style={
+                                    "backgroundColor": C_PANEL,
+                                    "border": f"1px solid {C_BORDER}",
+                                    "borderRadius": "8px",
+                                    "padding": "20px 22px",
+                                }),
+
+                                # ── Event toggles ────────────────────────────
+                                html.Div([
+                                    html.H3("Event Notifications",
+                                            style={"color": C_TEXT, "fontSize": "15px",
+                                                   "margin": "0 0 8px 0",
+                                                   "fontWeight": "600"}),
+                                    html.P("Select which events trigger an email.",
+                                           style={"color": C_MUTED, "fontSize": "12px",
+                                                  "margin": "0 0 14px 0"}),
+
+                                    dcc.Checklist(
+                                        id="event-checklist",
+                                        options=[
+                                            {"label": " 📈  Trade Signal (SIGNAL)",
+                                             "value": "NOTIFY_SIGNAL"},
+                                            {"label": " ⚪  No Signal (NO_SIGNAL)",
+                                             "value": "NOTIFY_NO_SIGNAL"},
+                                            {"label": " ⚠️  Analysis Error (ERROR)",
+                                             "value": "NOTIFY_ERROR"},
+                                            {"label": " 🚀  Runner Startup (STARTUP)",
+                                             "value": "NOTIFY_STARTUP"},
+                                            {"label": " 🛑  Runner Shutdown (SHUTDOWN)",
+                                             "value": "NOTIFY_SHUTDOWN"},
+                                            {"label": " 📡  Data Fetch Error (DATA_ERROR)",
+                                             "value": "NOTIFY_DATA_ERROR"},
+                                        ],
+                                        value=[
+                                            k for k, default in {
+                                                "NOTIFY_SIGNAL":     True,
+                                                "NOTIFY_NO_SIGNAL":  False,
+                                                "NOTIFY_ERROR":      True,
+                                                "NOTIFY_STARTUP":    False,
+                                                "NOTIFY_SHUTDOWN":   True,
+                                                "NOTIFY_DATA_ERROR": True,
+                                            }.items()
+                                            if os.environ.get(
+                                                k, "true" if default else "false"
+                                            ).lower() not in ("false", "0", "no", "off")
+                                        ],
+                                        inputStyle={"marginRight": "8px",
+                                                    "accentColor": C_BLUE,
+                                                    "cursor": "pointer",
+                                                    "width": "15px", "height": "15px"},
+                                        labelStyle={"display": "flex",
+                                                    "alignItems": "center",
+                                                    "cursor": "pointer",
+                                                    "color": C_TEXT,
+                                                    "backgroundColor": C_BG,
+                                                    "border": f"1px solid {C_BORDER}",
+                                                    "borderRadius": "6px",
+                                                    "padding": "10px 14px",
+                                                    "marginBottom": "8px",
+                                                    "fontSize": "13px"},
+                                    ),
+
+                                    html.P(
+                                        "Changes take effect after clicking ‘Save Settings’.",
+                                        style={"color": C_MUTED, "fontSize": "11px",
+                                               "marginTop": "12px"},
+                                    ),
+                                ], style={
+                                    "backgroundColor": C_PANEL,
+                                    "border": f"1px solid {C_BORDER}",
+                                    "borderRadius": "8px",
+                                    "padding": "20px 22px",
+                                }),
+                            ],
+                        ),
+                    ],
+                ),
             ],
         ),
     ],
@@ -331,6 +634,113 @@ def update(n_clicks, symbol, align_value, split_value):
             )],
         )
         return err_fig, html.Div(str(exc), style={"color": C_RED}), "Error"
+
+
+# ── Notifications callback ──────────────────────────────────────────────
+
+_ALL_EVENT_KEYS = [
+    "NOTIFY_SIGNAL", "NOTIFY_NO_SIGNAL", "NOTIFY_ERROR",
+    "NOTIFY_STARTUP", "NOTIFY_SHUTDOWN", "NOTIFY_DATA_ERROR",
+]
+
+
+@app.callback(
+    Output("notif-status", "children"),
+    Input("save-email-btn", "n_clicks"),
+    Input("test-email-btn", "n_clicks"),
+    State("smtp-host-input",     "value"),
+    State("smtp-port-input",     "value"),
+    State("smtp-user-input",     "value"),
+    State("smtp-password-input", "value"),
+    State("smtp-from-input",     "value"),
+    State("notify-to-input",     "value"),
+    State("smtp-tls-check",      "value"),
+    State("event-checklist",     "value"),
+    prevent_initial_call=True,
+)
+def handle_email_settings(save_n, test_n, host, port, user, password,
+                          from_addr, to_addrs, use_tls, event_vals):
+    """Save SMTP settings to env (and .env file) or send a test email."""
+    from dash import ctx
+
+    # Apply form values to the running process environment
+    os.environ["SMTP_HOST"]     = host     or ""
+    os.environ["SMTP_PORT"]     = str(port or "587")
+    os.environ["SMTP_USER"]     = user     or ""
+    os.environ["SMTP_PASSWORD"] = password or ""
+    os.environ["SMTP_FROM"]     = from_addr or ""
+    os.environ["NOTIFY_TO"]     = to_addrs or ""
+    os.environ["SMTP_USE_TLS"]  = "true" if use_tls else "false"
+
+    # Apply per-event toggles
+    selected = set(event_vals or [])
+    for key in _ALL_EVENT_KEYS:
+        os.environ[key] = "true" if key in selected else "false"
+
+    triggered = ctx.triggered_id
+
+    # ── Save Settings ────────────────────────────────────────────────
+    if triggered == "save-email-btn":
+        lines = [
+            f"SMTP_HOST={os.environ.get('SMTP_HOST', '')}",
+            f"SMTP_PORT={os.environ.get('SMTP_PORT', '587')}",
+            f"SMTP_USER={os.environ.get('SMTP_USER', '')}",
+            f"SMTP_PASSWORD={os.environ.get('SMTP_PASSWORD', '')}",
+            f"SMTP_FROM={os.environ.get('SMTP_FROM', '')}",
+            f"NOTIFY_TO={os.environ.get('NOTIFY_TO', '')}",
+            f"SMTP_USE_TLS={os.environ.get('SMTP_USE_TLS', 'true')}",
+        ] + [f"{k}={os.environ.get(k, '')}" for k in _ALL_EVENT_KEYS]
+        try:
+            with open(".env", "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            return html.Div(
+                "✅ Settings saved to .env — restart runner to reload from file.",
+                style={"color": C_GREEN},
+            )
+        except OSError as e:
+            return html.Div(
+                f"⚠️ Applied to session but .env write failed: {e}",
+                style={"color": C_ORANGE},
+            )
+
+    # ── Send Test Email ──────────────────────────────────────────────
+    if triggered == "test-email-btn":
+        notifier = EmailNotifier()  # reads updated env vars
+        if not notifier._is_configured:
+            return html.Div(
+                "❌ SMTP not configured. Fill in Host, User, Password and To fields first.",
+                style={"color": C_RED},
+            )
+        try:
+            ok = notifier.test()
+            if ok:
+                return html.Div(
+                    f"✅ Test email sent → {', '.join(notifier.to_addrs)}",
+                    style={"color": C_GREEN},
+                )
+            return html.Div(
+                "❌ Failed to send — check SMTP credentials and server logs.",
+                style={"color": C_RED},
+            )
+        except Exception as exc:
+            return html.Div(f"❌ Error: {exc}", style={"color": C_RED})
+
+    return ""
+
+
+# ── All-signals callback ──────────────────────────────────────────────────
+
+@app.callback(
+    Output("signals-table",  "children"),
+    Output("signals-status", "children"),
+    Input("scan-btn",        "n_clicks"),
+    prevent_initial_call=True,
+)
+def update_signals_table(_n_clicks):
+    """Scan all symbols once and refresh the signals table."""
+    records    = scan_all_symbols(symbols=SYMBOLS)
+    scanned_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return _scan_table(records), f"Last scan: {scanned_at}"
 
 
 # ── Figure builder ────────────────────────────────────────────────────────────
@@ -547,6 +957,114 @@ def _candles(df: pd.DataFrame, name: str, show_legend: bool = True) -> go.Candle
         ],
     )
 
+# ── All-signals scan table ──────────────────────────────────────────────────
+
+def _scan_table(records: list) -> html.Div:
+    """Render scan_all_symbols() results as a styled summary table."""
+    if not records:
+        return html.P("No results.", style={"color": C_MUTED, "fontSize": "13px"})
+
+    _COLS = ["Symbol", "Status", "Direction", "Price",
+             "Entry", "Stop", "Target", "Fib 61.8%", "R:R", "Entry TS"]
+
+    def _th(text: str, i: int) -> html.Th:
+        return html.Th(text, style={
+            "padding": "8px 14px",
+            "backgroundColor": C_PANEL,
+            "color": C_MUTED,
+            "textAlign": "left" if i < 2 else "right",
+            "fontSize": "11px",
+            "textTransform": "uppercase",
+            "letterSpacing": "0.5px",
+            "borderBottom": f"1px solid {C_BORDER}",
+            "whiteSpace": "nowrap",
+        })
+
+    def _td(text: str, color: str = C_TEXT, bold: bool = False,
+            align: str = "right") -> html.Td:
+        return html.Td(str(text), style={
+            "padding": "9px 14px",
+            "color": color,
+            "fontWeight": "700" if bold else "normal",
+            "textAlign": align,
+            "borderBottom": f"1px solid {C_BORDER}",
+            "fontSize": "13px",
+            "whiteSpace": "nowrap",
+        })
+
+    thead = html.Thead(html.Tr([_th(c, i) for i, c in enumerate(_COLS)]))
+    rows: list = []
+
+    for r in records:
+        sym   = r["symbol"]
+        price = r.get("latest_price")
+        sig   = r.get("signal")
+        err   = r.get("error")
+        scanned = str(r.get("scanned_at", ""))[:19]
+
+        if err:
+            rows.append(html.Tr([
+                _td(sym, C_TEXT, bold=True, align="left"),
+                html.Td(f"❌  {err[:70]}", colSpan=9, style={
+                    "padding": "9px 14px", "color": C_RED,
+                    "fontSize": "12px",
+                    "borderBottom": f"1px solid {C_BORDER}",
+                }),
+            ]))
+        elif sig is None:
+            p = f"{price:.2f}" if price is not None else "—"
+            rows.append(html.Tr([
+                _td(sym,             C_TEXT, bold=True, align="left"),
+                _td("⚪  No Signal",  C_MUTED, align="left"),
+                _td("—",             C_MUTED),
+                _td(p,               C_TEXT),
+                *[_td("—",           C_MUTED) for _ in range(6)],
+            ]))
+        else:
+            direction = sig["direction"].upper()
+            dc        = C_GREEN if sig["direction"] == "bull" else C_RED
+            pos       = sig["position"]
+            rr        = sig.get("RR") or 0.0
+            rr_color  = C_GREEN if rr >= 2 else (C_ORANGE if rr >= 1 else C_RED)
+            p         = f"{price:.2f}" if price is not None else "—"
+            ets       = str(sig.get("entry_ts", ""))[:16]
+            icon      = "🐂" if direction == "BULL" else "🐻"
+            rows.append(html.Tr([
+                _td(sym,                          C_TEXT, bold=True, align="left"),
+                _td("✅  SIGNAL",                 dc,     bold=True, align="left"),
+                _td(f"{icon}  {direction}",       dc),
+                _td(p,                            C_TEXT),
+                _td(f"{sig['entry_price']:.4f}",  C_BLUE),
+                _td(f"{sig['stop_loss']:.4f}",    C_RED),
+                _td(f"{pos['target_price']:.4f}", C_GREEN),
+                _td(f"{sig['fib_level']:.4f}",    C_ORANGE),
+                _td(f"1 : {rr:.2f}",             rr_color),
+                _td(ets,                          C_MUTED, align="left"),
+            ]))
+
+    n_active = sum(1 for r in records if r.get("signal"))
+    n_err    = sum(1 for r in records if r.get("error"))
+
+    return html.Div([
+        html.Div(style={"overflowX": "auto"}, children=[
+            html.Table(
+                [thead, html.Tbody(rows)],
+                style={
+                    "width": "100%",
+                    "borderCollapse": "collapse",
+                    "backgroundColor": C_BG,
+                    "border": f"1px solid {C_BORDER}",
+                    "borderRadius": "8px",
+                    "fontFamily": "'Courier New', Courier, monospace",
+                },
+            ),
+        ]),
+        html.P(
+            f"{len(records)} symbol(s) scanned  ·  "
+            f"{n_active} active signal(s)  ·  {n_err} error(s)",
+            style={"color": C_MUTED, "fontSize": "12px", "marginTop": "10px"},
+        ),
+    ])
 
 # ── Signal summary panel ──────────────────────────────────────────────────────
 def _signal_panel(signal) -> html.Div:
